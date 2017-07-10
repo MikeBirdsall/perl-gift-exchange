@@ -1,0 +1,212 @@
+#!/usr/local/bin/perl -w
+#
+# Module to manage user wishlist item objects.
+# WishItems can be (have the methods):
+# new       -> get or create the wishlist for a particular person
+# buy       -> mark some items as bought
+# by        -> Return the user who created the item
+# for       -> return the person the item is intended for
+# requested -> set and/or return the number of this item requested
+# description -> set and/or return the description of the item 
+
+#
+# Attributes to add to the object:
+# _last_update
+# _purchasers
+package Christmas::Wishlist::WishItem;
+
+use Data::Dumper;
+use Carp;
+use strict;
+
+my %valid_param = map { $_ => 1 } qw(for by description ident requested bought);
+
+sub new
+{
+    my $class = shift;
+    $class = ref($class) || $class;
+    my $self = bless {}, $class;
+    return $self->_init(@_);
+}
+
+sub _init
+{
+    my ( $self, %arg ) = @_;
+
+    # Check for "extra" parameters
+
+    foreach my $param ( keys %arg ) {
+        return unless defined $valid_param{$param};
+    }
+
+    %$self = (
+        _for         => $arg{for}         || croak("missing recipient"),
+        _creator     => $arg{by}          || croak( "missing suggestor", ),
+        _description => $arg{description} || "No Description",
+        _ident       => $arg{ident}       || "",
+        _requested   => $arg{requested}   || "any",
+        _bought      => $arg{bought}      || 0,
+        _deleted     => 0,
+        _notes       => [],
+        _purchasers  => {},
+    );
+
+    return $self;
+
+}
+
+#_____________________________________________________________________________
+
+sub by
+{
+    my ( $self, $creator ) = @_;
+    $self->{_creator} = $creator if defined $creator;
+    return $self->{_creator};
+}
+
+sub for
+{
+    my ( $self, $for ) = @_;
+    $self->{_for} = $for if defined $for;
+    return $self->{_for};
+}
+
+sub requested
+{
+    my ( $self, $requested ) = @_;
+    $self->{_requested} = $requested if defined $requested;
+    return $self->{_requested};
+}
+
+sub description
+{
+    my ( $self, $description ) = @_;
+    $self->{_description} = $description if defined $description;
+    return $self->{_description};
+}
+
+sub ident
+{
+    my ($self) = @_;
+    return $self->{_ident};
+}
+
+sub wanted
+{
+    return if ( scalar @_ > 1 );
+    my ($self) = shift;
+    return "any" if ( $self->requested eq "any" );
+    return "error" if ( $self->requested !~ /^\d+$/ );
+
+    return $self->requested - $self->{_bought};
+}
+
+sub buy
+{
+    my ( $self, $num, $descrip, $buyer ) = @_;
+
+    if ( $self->requested !~ /^\d+$/ ) {
+        $self->{_bought} += $num;
+        $self->{_purchasers}->{$buyer} += $num if ( defined $buyer );
+        push ( @{ $self->{_notes} }, $descrip ) if $descrip;
+        return "any";
+    } elsif ( $self->wanted >= $num ) {
+        $self->{_bought} += $num;
+        $self->{_purchasers}->{$buyer} += $num if ( defined $buyer );
+        push ( @{ $self->{_notes} }, $descrip ) if $descrip;
+        return $num;
+    }
+    return;
+}
+
+sub purchased_by
+{
+    my ( $self, $caller ) = @_;
+
+    return $self->{_purchasers}->{$caller};
+}
+
+sub private
+{
+    return 1;
+}
+
+sub notes
+{
+    my ($self) = @_;
+    return $self->{_notes};
+}
+
+sub deleted
+{
+    my ( $self, $delete ) = @_;
+    if ( defined $delete ) {
+        $self->{_deleted} = $delete;
+        $self->requested(0);
+    }
+    return $self->{_deleted};
+}
+
+sub bought
+{
+    my ( $self, $notes ) = @_;
+    push ( @{ $self->{_notes} }, $notes ) if defined $notes;
+    return $self->{_bought};
+}
+
+1;
+
+#_____________________________________________________________________________
+
+__END__
+
+=head1 NAME
+
+WishItem.pm - module to manage a WishItem
+
+=head1 VERSION
+
+This document refers to version 0.80 of WishItem.pm, released Jan 1, 2003.
+
+=head1 SYNOPSIS
+
+    commandname parameters
+
+=head1 DESCRIPTION
+
+=head2 Overview
+
+=head2 Constructor and initialization
+
+=head2 Class and object methods
+
+=head2 Any other information that's important
+
+=head1 ENVIRONMENT
+
+=head1 DIAGNOSTICS
+
+=over 4
+
+=item "error message that may appear"
+
+Explanation of error message
+
+=back
+
+=head1 BUGS
+
+=head1 FILES
+
+=head1 SEE ALSO
+
+=head1 AUTHOR
+
+Michael G. Birdsall
+
+=head1 COPYRIGHT
+
+Copyright (c) 2002, Michael G. Birdsall. All Rights Reserved.
+This module is free software. It may be used, redistributed
+and/or modified under the same terms as Perl itself.
+

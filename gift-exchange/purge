@@ -1,0 +1,26 @@
+#!/usr/local/bin/perl -w
+use lib '/big/dom/xkirkbird/lib/perl5/site_perl/5.005/';
+use Christmas::Wishlist;
+use strict;
+
+my @people;
+my @files;
+
+my $dir = ( $ENV{HOME} || $ENV{LOGDIR} || ( getpwuid($>) )[7] ) . "/wishlistdata/family";
+
+Christmas::Wishlist->set_repository( $dir . "/" )
+  or error_page("Repository $dir does not exist.");
+
+if (@ARGV) {
+    @people = @ARGV;
+} else {
+    @files = glob("$dir/wishlist\.*");
+    @people = map { m[$dir/wishlist\.(.*)] } @files;
+}
+
+foreach my $person (@people) {
+    print("Purging $person\n");
+    my $wl = Christmas::Wishlist->new( userid => $person );
+    $wl->purge();
+    $wl->write("wishlist.purged.$person");
+}

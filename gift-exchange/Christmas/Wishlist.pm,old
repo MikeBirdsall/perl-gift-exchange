@@ -1,0 +1,523 @@
+#!/usr/local/bin/perl -w
+# $Id: Wishlist.pm,v 1.13 2003/01/02 03:46:43 mbirdsal Exp $
+# $Name: wishlist-0_8 $
+#
+# Module to manage user wishlist objects.
+# Wishlists are stored in a file in the repository at $defdir
+# The filename is wishlist.<owner> where <owner> is the userid
+# of the person whose wishlist it is.
+#
+# The file can have commentary records starting with a #
+# or transaction records including:
+#  |<when> <whom> added  <author> <description> <needed> <expires>
+#  |<when> <whom> bought <author> <description> <num-bought>
+#  |<when> <whom> delete <author> <description> 
+#
+# where fields are separated by tabs.
+#
+# Modules:
+#    new
+#    remove
+#    purchase
+#    suggest
+#    item
+#    get_items
+#    update
+#    last_update
+# 
+
+package Christmas::Wishlist;
+
+use lib "/users/m/mbirdsal/perllib/";
+use Christmas::Wishlist::WishItem;
+use Time::Local;
+use Data::Dumper;
+use Carp;
+use strict;
+
+#_____________________________________________________________________________
+# Ultimately, a repository will probably need to be an attribute of a wishlist, 
+# or an object all on its own. 
+# For now, we use a closure to make it a class attribute.
+{
+    my $defdir;
+
+    # Common values on a bert or on mbirdsal are:
+    # "/users/m/mbirdsal/apache/htdocs/family/data/";
+    # "/big/dom/xkirkbird/www/mbirdsall/family/data/";
+
+    sub set_repository
+    {
+        shift;
+        $defdir = shift;
+        return $defdir;
+    }
+
+    sub _get_repository
+    {
+        return $defdir;
+    }
+}
+
+#_____________________________________________________________________________
+# Create a wishlist object 
+# 
+# Attributes to add to the object: Last Updated
+sub new
+{
+    my $class = shift;
+    $class = ref($class) || $class;
+    my $self = bless {}, $class;
+    return $self->_init(@_);
+}
+
+#_____________________________________________________________________________
+# Set the initial data
+#
+# Arguments: a hash contain the following keyed items:
+#      userid => login id of the user whose wishlist is being initialized (req)
+#      path   => a repository path for the wishlist (optional); defaults to the
+#                directory set with set_repository
+#      create => determines special create checks if defined (boolean)
+#                false -> fail if the wishlist isn't already in existence
+#                         (refuse to create a new wishlist)
+#                true  -> fail if the wishlist is already in existence
+#                         (refuse to use an existing wishlist
+#      when   => records the time the wishlist was last updated 
+#
+# A later enhancement may be to cache wishlists already read from disk
+# rather than re-reading them. 
+sub _init
+{
+    my ( $self, %arg ) = @_;
+
+    %$self = (
+        _userid      => $arg{userid} || croak("missing userid"),
+        _path        => $arg{path}   || $self->_get_repository,
+        _item        => [],
+        _last_update => $arg{when}   || "unknown",
+    );
+
+    # form filename
+    my $fname = $self->_filename();
+
+    # If wishlist already exists
+    if ( -f $fname && -s _ ) {
+        return if ( defined $arg{create} and $arg{create} );
+
+        # Read the file and initialize the object from the data
+        $self->_read($fname);
+
+        open( NEWTRANS, ">>$fname" );
+    } else {
+        return if ( defined $arg{create} and !$arg{create} );
+
+        # Create the file
+        open( NEWTRANS, ">" . $fname );
+        $self->_write_header();
+
+        #If this is a truly new file, this is the time of last update
+        $self->{_last_update} = localtime;
+    }
+
+    return $self;
+}
+
+#_____________________________________________________________________________
+#
+# numeric_time
+#    returns the local (seconds from start of epoch) time for a time string
+#    formatted like the return from scalar localtime
+#
+sub numeric_time
+{
+    my ($time) = @_;
+
+    my (%numericmonth) = (
+        Jan => 0,
+        Feb => 1,
+        Mar => 2,
+        Apr => 3,
+        May => 4,
+        Jun => 5,
+        Jul => 6,
+        Aug => 7,
+        Sep => 8,
+        Oct => 9,
+        Nov => 10,
+        Dec => 11
+    );
+
+    my ( $mmm, $dd, $hh, $min, $sec, $yyyy ) =
+      ( $time =~ /\w*\s+(\w{3})\s+(\d*)\s+(\d+):(\d+):(\d+)\s+(\d+)/ );
+
+    return timelocal( $sec, $min, $hh, $dd, $numericmonth{$mmm}, $yyyy - 1900 );
+}
+
+#_____________________________________________________________________________
+#
+# _read - reads the wishlist file whose name is passed and update the wishlist 
+#         items based on the log in that file
+
+sub _read
+{
+    my ( $self, $fname ) = @_;
+    my $tran;
+
+    open( NEWTRANS, "$fname" );
+
+    # Coding around a bug in Perl 5.005 that shows up in Data::Dumper
+
+    while (<NEWTRANS>) {
+        chomp;
+        next if /^\s*#/;
+        next if /^\s*$/;
+        my ( $time, $author, $transcode, $itemnum, $descrip, $num ) =
+          split (/\t/);
+
+        my ($update_time) = numeric_time($time);
+
+        # Handle the proper transactions
+        SWITCH: {
+            if ( $transcode =~ /^add/ ) { $tran = "_update"; last SWITCH }
+            if ( $transcode =~ /^del/ ) { $tran = "_delete"; last SWITCH }
+            if ( $transcode =~ /^bou/ ) { $tran = "_bought"; last SWITCH }
+        }
+
+        $self->$tran( $itemnum, $descrip, $num, $author, $update_time );
+
+    }
+
+}
+
+#_____________________________________________________________________________
+# Create the filename for a wishlist
+# Uses the path and userid to create the full path to the wishlist file
+sub _filename
+{
+    my ( $self, %arg ) = @_;
+    return $self->{_path} . "wishlist." . $self->{_userid};
+}
+
+#_____________________________________________________________________________
+#
+# _write_header
+# 
+# Writes the header lines at the top of a new wishlist file
+sub _write_header
+{
+    my ($self) = @_;
+    my $userid = $self->{_userid};
+    print NEWTRANS _unindent(<<"ENDHEADER");
+        #Defining a wishlist for $userid
+        #Local Day, Time, and Date\twho\top\tident\tdescription\tnum 
+ENDHEADER
+}
+
+#_____________________________________________________________________________
+#
+# _update 
+#     changes the object using the information in a logfile add transaction
+#
+# Part of the 'read" subsystem that deals with an existing wishlist.
+sub _update
+{
+    my ( $self, $itemnum, $descrip, $num, $author, $update_time ) = @_;
+
+    if ( defined $self->item($itemnum) ) {
+        $self->item($itemnum)->description($descrip);
+        $self->item($itemnum)->requested($num);
+        $self->{_last_update} = $update_time;
+    } else {
+        $self->{_item}[ $itemnum - 1 ] = Christmas::Wishlist::WishItem->new(
+            for         => $self->{_userid},
+            by          => $author,
+            requested   => $num,
+            description => $descrip,
+            ident       => $itemnum,
+        );
+        $self->{_last_update} = $update_time;
+    }
+
+}
+
+#_____________________________________________________________________________
+#
+# update
+# Updates the modifiable attributes of an existing item
+sub update
+{
+    my ( $self, %args ) = @_;
+    return
+      unless $args{itemnum}
+      and $args{description}
+      and $args{by}
+      and $args{requested};
+
+    $self->_update( $args{itemnum}, $args{description}, $args{requested},
+        $args{by} );
+
+    _print_log(
+        by          => $args{by},
+        transcode   => "added",
+        itemnum     => $args{itemnum},
+        description => $args{description},
+        how_many    => $args{requested},
+    );
+    return 1;
+}
+
+#_____________________________________________________________________________
+#
+# _tranlog
+# Creates a properly formatted transaction line to the log for this transaction
+
+sub _tranlog
+{
+    my (%args) = @_;
+
+    return join (
+        "\t",
+        (
+            scalar localtime, $args{by},          $args{transcode},
+            $args{itemnum},   $args{description}, $args{how_many}
+        )
+    );
+}
+
+#_____________________________________________________________________________
+#
+# _print_log 
+#
+sub _print_log
+{
+    my (%args) = @_;
+    my $string = _tranlog(%args);
+    print NEWTRANS "$string\n";
+}
+
+#_____________________________________________________________________________
+#
+sub remove
+{
+    my ( $self, %args ) = @_;
+
+    $self->_delete( $args{itemnum}, $args{description}, 0, 0, time );
+    $args{transcode} = "delete";
+    _print_log(
+        by          => $args{by},
+        transcode   => "delete",
+        itemnum     => $args{itemnum},
+        description => $args{description},
+        how_many    => $args{how_many},
+    );
+}
+
+#_____________________________________________________________________________
+# _delete - removes a deleted item from the wishlist object
+# Both part of the 'read" subsystem that deals with an existing wishlist, and
+# the subsystem that processes new requests.
+
+sub _delete
+{
+    my ( $self, $itemnumber, $descrip, undef, undef, $update_time ) = @_;
+
+    # Note that the item index is 1 less than the item number
+    return unless ( defined $self->{"_item"}[ $itemnumber - 1 ] );
+
+    $self->{"_item"}[ $itemnumber - 1 ]->deleted(1);
+    $self->{"_last_update"} = $update_time;
+
+    return $self;
+}
+
+#_____________________________________________________________________________
+#
+# purchase - updates item and writes transaction log
+#            need to add record of who purchased
+# Args: Hash with element keys:
+#    itemnum
+#    description
+#    by
+#    how_many
+
+sub purchase
+{
+    my ( $self, %args ) = @_;
+    return
+      unless $args{itemnum}
+      and defined $args{description}
+      and $args{by}
+      and $args{how_many};
+
+    return
+      if (
+        !$self->_bought(
+            $args{itemnum}, $args{description}, $args{how_many},
+            $args{by},      time
+        )
+      );
+
+    _print_log(
+        by          => $args{by},
+        transcode   => "bought",
+        itemnum     => $args{itemnum},
+        description => $args{description},
+        how_many    => $args{how_many},
+    );
+
+    return 1;
+}
+
+#_____________________________________________________________________________
+#
+sub _bought
+{
+    my ( $self, $itemnum, $descrip, $num, $by, $update_time ) = @_;
+
+    my $item = $self->item($itemnum);
+    return $item->buy( $num, $descrip, $by );
+}
+
+#_____________________________________________________________________________
+#
+sub suggest
+{
+    my ( $self, %args ) = @_;
+    return unless $args{by} and $args{requested} and $args{description};
+
+    my $newitemindex = $#{ $self->{_item} } + 1;
+    my $newitemnum   = $newitemindex + 1;
+
+    # Add the owner of the wishlist as the "for" argument
+    $args{for}   = $self->{_userid};
+    $args{ident} = $newitemnum;
+
+    # uses args for, by, requested, description, ident
+    my $newitem = Christmas::Wishlist::WishItem->new( (%args) );
+    $self->{_item}[$newitemindex] = $newitem;
+
+    # uses args by, description, transcode, how_many, itemnum
+    _print_log(
+        by          => $args{by},
+        transcode   => "added",
+        itemnum     => $newitemnum,
+        description => $args{description},
+        how_many    => $args{requested},
+    );
+    return $newitemnum;
+}
+
+#_____________________________________________________________________________
+#
+sub userid
+{
+    my ($self) = @_;
+
+    return $self->{_userid};
+}
+
+#_____________________________________________________________________________
+#
+sub item
+{
+    my ( $self, $num ) = @_;
+
+    # The item index is 1 less than the item number
+    return $self->{_item}[ $num - 1 ];
+}
+
+#_____________________________________________________________________________
+#
+sub last_update
+{
+    my ($self) = @_;
+
+    return $self->{_last_update};
+}
+
+#_____________________________________________________________________________
+#
+sub get_items
+{
+    my $self = shift;
+
+    return @{ $self->{_item} };
+}
+
+#_____________________________________________________________________________
+#
+sub _unindent
+{
+    my $string = shift;
+    $string =~ s/^\s+//gm;
+    return $string;
+}
+
+1;
+
+#_____________________________________________________________________________
+__END__
+
+=head1 NAME
+
+Wishlist.pm - Perl Module to manage Gift Wishlists
+
+=head1 VERSION
+
+This document refers to version 0.80 of Christmas::Wishlist,
+released Jan 1, 2003.
+
+=head1 SYNOPSIS
+
+    include Christmas::Wishlist;
+    Christmas::Wishlist->new(userid=>$user);
+
+    Christmas::Wishlist->remove(               );
+
+    Christmas::Wishlist->purchase(               );
+
+    Christmas::Wishlist->suggest(               );
+
+    Christmas::Wishlist->item(               );
+
+    @itemlist = Christmas::Wishlist->get_items(               );
+
+=head1 DESCRIPTION
+
+=head2 Overview
+
+=head2 Constructor and initialization
+
+=head2 Class and object methods
+
+=head2 Any other information that's important
+
+=head1 ENVIRONMENT
+
+=head1 DIAGNOSTICS
+
+=over 4
+
+=item "error message that may appear"
+
+Explanation of error message
+
+=back
+
+=head1 BUGS
+
+=head1 FILES
+
+=head1 SEE ALSO
+
+=head1 AUTHOR
+
+Michael G. Birdsall
+
+=head1 COPYRIGHT
+
+Copyright (c) 2002,2003, Michael G. Birdsall. All Rights Reserved.
+This module is free software. It may be used, redistributed
+and/or modified under the same terms as Perl itself.
+
